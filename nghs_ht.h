@@ -53,34 +53,49 @@ private:
   key_t roommate; // level 1 edge
   entry_t *records;
   std::atomic<index_t> used;
-  parlay::sequence<uint32_t> navigation;
+  uint32_t *navigation;
+  uint32_t navigation_length;
   index_t capacity;
   index_t firstIndex(key_t k) const { return parlay::hash32(k) % capacity; }
   index_t incrementIndex(index_t h) {
     return ((h + 1) == capacity) ? 0 : h + 1;
   }
   index_t decrementIndex(index_t h) { return (h == 0) ? capacity - 1 : h - 1; }
-  inline size_t get_leaf_size(index_t capacity) { return capacity / B; }
-  inline size_t get_tree_size(index_t capacity) {
-    return (size_t)capacity / B * 2 - 1;
+  inline uint32_t get_leaf_size(index_t capacity) { return capacity / B; }
+  inline uint32_t get_tree_size(index_t capacity) {
+    // std::cout << capacity << " " << capacity / B * 2 - 1 << std::endl;
+    return capacity / B * 2 - 1;
   }
-  inline size_t get_tree_index(index_t i) { return capacity / B - 1 + i / B; }
+  inline uint32_t get_tree_index(index_t i) {
+    return get_leaf_size(capacity) - 1 + i / B;
+  }
   void initialization(entry_t *records, index_t capacity, entry_t empty_entry) {
     parlay::parallel_for(0, capacity,
                          [&](auto i) { records[i] = empty_entry; });
   }
   void ensure_capacity(uint32_t n_append) {
     if (0.75 * capacity < n_append + used) {
+      //
       uint32_t new_capacity =
           std::min(std::max(n_append + used, capacity * 2), (index_t)1 << 31) /
           B * B;
+      //
       entry_t *new_records = new entry_t[new_capacity];
       initialization(new_records, new_capacity, empty_entry);
       entry_t *old_records = records;
       records = new_records;
+      //
       index_t old_capacity = capacity;
       capacity = new_capacity;
-      navigation = parlay::sequence<uint32_t>(get_tree_size(capacity), 0);
+      //
+      uint32_t new_length = get_tree_size(capacity);
+      uint32_t navigation_length = new_length;
+      uint32_t *new_navigation = new uint32_t[new_length];
+      memset(new_navigation, 0, sizeof(uint32_t) * new_length);
+      delete[] navigation;
+      navigation = new_navigation;
+
+      //
       parlay::parallel_for(0, old_capacity, [&](auto i) {
         if (old_records[i] != deleted_entry && old_records[i] != empty_entry)
           insert(old_records[i].k, entry_t::get_raw(old_records[i].v));
@@ -94,16 +109,56 @@ private:
     uint64_t nval = *(reinterpret_cast<uint64_t *>(&_nval));
     return __sync_bool_compare_and_swap(ptr, oval, nval);
   }
+  void update(index_t k) {
+    index_t i = get_tree_index(k);
+    navigation[i] |= 1;
+    while (i) {
+      i = (i - 1) / 2;
+      if (navigation[i] % 2)
+        return;
+      navigation[i] |= 1;
+    }
+  }
+  void navigate_top_down(index_t root = 0) {
+    if (navigation[root] % 2) {
+      if (root << 1 > navigation_length) {
+        index_t start = (navigation_length - (get_leaf_size(capacity) - 1)) * B;
+        navigation[root] = 0;
+        for (auto i = start; i < start + B; i++)
+          navigation[root] |= records[i].v;
+        return;
+      }
+      index_t l = (root << 1) + 1;
+      index_t r = (root << 1) + 2;
+      parlay::par_do(
+          [&]() {
+            if (l < navigation_length) {
+              navigate_top_down(l);
+            }
+          },
+          [&]() {
+            if (r < navigation_length)
+              navigate_top_down(r);
+          });
+      navigation[root] =
+          l < navigation_length ? navigation[root] | navigation[l] : 0;
+      navigation[root] = r < navigation_length
+                             ? navigation[root] | navigation[r]
+                             : navigation[root];
+    }
+  }
+  void fetch_top_down(parlay::sequence<key_t> &nghs, index_t root = 0) {}
 
 public:
   nghs_ht(key_t _empty_key, index_t _capacity = B)
       : capacity(std::max(_capacity, (index_t)B) / B * B), used(0),
         empty_key(_empty_key), empty_entry(entry_t(_empty_key)),
-        roommate(_empty_key),
-        // navigation(parlay::sequence<uint32_t>(get_tree_size(capacity), 0)),
-        deleted_entry(entry_t(_empty_key, deleted_val)) {
+        roommate(_empty_key), deleted_entry(entry_t(_empty_key, deleted_val)) {
     records = new entry_t[capacity];
     initialization(records, capacity, empty_entry);
+    navigation_length = get_tree_size(capacity),
+    navigation = new uint32_t[navigation_length];
+    memset(navigation, 0, navigation_length * sizeof(uint32_t));
   }
   ~nghs_ht() { delete[] records; }
   nghs_ht(const nghs_ht &) = delete;
@@ -111,10 +166,11 @@ public:
   nghs_ht(nghs_ht &&) = delete;
   nghs_ht &operator=(nghs_ht &&) = delete;
 
-public:
   index_t get_size() {
-    return used + 1; //+1 for roommate
+    index_t u = used;
+    return (roommate == empty_key) ? u : u + 1; //+1 for roommate
   }
+
   void insert_exclusive(key_t k, val_t v) {
     if (v == 1) {
       if (roommate != empty_key) {
@@ -135,11 +191,13 @@ public:
       if (records[i].k == k) {
         // update value
         records[i] = item;
+        update(i);
         return;
       }
       if (records[i] == deleted_entry) {
         // find a deleted slot
         records[i] = item;
+        update(i);
         used++;
         return;
       }
@@ -150,6 +208,7 @@ public:
       }
     }
     records[i] = item;
+    update(i);
     used++;
   }
 
@@ -172,11 +231,13 @@ public:
       if (records[i].k == k) {
         // update value
         records[i] = item;
+        update(i);
         return;
       }
       if (cas(&records[i], deleted_entry, item) ||
           cas(&records[i], empty_entry, item)) {
         used++;
+        update(i);
         return;
       }
       i = incrementIndex(i);
@@ -214,6 +275,7 @@ public:
     while (records[i] != empty_entry) {
       if (records[i].k == k) {
         records[i] = deleted_entry; // mark slot as deleted
+        update(i);
         used--;
         return;
       }
@@ -259,6 +321,31 @@ public:
       return a.first < b.first;
     });
     return alive;
+  }
+  void batch_insertion(parlay::sequence<std::pair<key_t, val_t>> &ins) {
+    ensure_capacity(ins.size());
+    parlay::parallel_for(0, ins.size(),
+                         [&](auto i) { insert(ins[i].first, ins[i].second); });
+    navigate_top_down();
+  }
+  void batch_update(parlay::sequence<std::pair<key_t, val_t>> &upd) {
+    parlay::parallel_for(0, upd.size(),
+                         [&](auto i) { insert(upd[i].first, upd[i].second); });
+    navigate_top_down();
+  }
+  void batch_deletion(parlay::sequence<std::pair<key_t, val_t>> &del) {
+    parlay::parallel_for(0, del.size(),
+                         [&](auto i) { delete (del[i].first, del[i].second); });
+    navigate_top_down();
+  }
+  parlay::sequence<key_t> fetch(key_t k, val_t l) {
+    parlay::sequence<key_t> nghs;
+    if (l == 1 && roommate != empty_key)
+      nghs.push_back(roommate);
+    else {
+      fetch_top_down(nghs);
+    }
+    return nghs;
   }
 };
 #endif
