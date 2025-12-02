@@ -53,6 +53,7 @@ private:
   key_t roommate; // level 1 edge
   entry_t *records;
   std::atomic<index_t> used;
+  std::atomic<key_t> level_size[33];
   uint32_t *navigation;
   uint32_t navigation_length;
   index_t capacity;
@@ -147,7 +148,20 @@ private:
                              : navigation[root];
     }
   }
-  void fetch_top_down(parlay::sequence<key_t> &nghs, index_t root = 0) {}
+  void fetch_top_down(parlay::sequence<key_t> &nghs, uint32_t l,
+                      std::atomic<key_t> &fetched, index_t root = 0) {
+    if (root << 1 < navigation_length) {
+      parlay::par_do(
+          [&]() { fetch_top_down(nghs, l, fetched, (root << 1) + 1); },
+          [&]() { fetch_top_down(nghs, l, fetched, (root << 1) + 2); });
+    } else {
+      index_t start = (navigation_length - (get_leaf_size(capacity) - 1)) * B;
+      for (auto i = start; i < start + B; i++)
+        if (entry_t::get_raw(records[i].v) == l) {
+          nghs[fetched.fetch_add(1)] = records[i].k;
+        }
+    }
+  }
 
 public:
   nghs_ht(key_t _empty_key, index_t _capacity = B)
@@ -171,7 +185,7 @@ public:
     return (roommate == empty_key) ? u : u + 1; //+1 for roommate
   }
 
-  void insert_exclusive(key_t k, val_t v) {
+  void insert_exclusive(key_t k, val_t v, bool update_counter = true) {
     if (v == 1) {
       if (roommate != empty_key) {
         std::cout << "repeat inserting level 1 edge" << std::endl;
@@ -190,6 +204,10 @@ public:
     while (records[i] != empty_entry) {
       if (records[i].k == k) {
         // update value
+        if (update_counter) {
+          level_size[entry_t::get_raw(records[i].v)]--;
+          level_size[v]++;
+        }
         records[i] = item;
         update(i);
         return;
@@ -199,6 +217,9 @@ public:
         records[i] = item;
         update(i);
         used++;
+        if (update_counter) {
+          level_size[v]++;
+        }
         return;
       }
       i = incrementIndex(i);
@@ -212,7 +233,7 @@ public:
     used++;
   }
 
-  void insert(key_t k, val_t v) {
+  void insert(key_t k, val_t v, bool update_counter = true) {
     // std::cout << k << " " << v << std::endl;
     if (v == 1) {
       if (!__sync_bool_compare_and_swap((uint32_t *)(&roommate),
@@ -231,6 +252,10 @@ public:
       if (records[i].k == k) {
         // update value
         records[i] = item;
+        if (update_counter) {
+          level_size[entry_t::get_raw(records[i].v)]--;
+          level_size[v]++;
+        }
         update(i);
         return;
       }
@@ -238,6 +263,8 @@ public:
           cas(&records[i], empty_entry, item)) {
         used++;
         update(i);
+        if (update_counter)
+          level_size[v]++;
         return;
       }
       i = incrementIndex(i);
@@ -343,7 +370,8 @@ public:
     if (l == 1 && roommate != empty_key)
       nghs.push_back(roommate);
     else {
-      fetch_top_down(nghs);
+      nghs.resize(level_size[l]);
+      fetch_top_down(nghs, l, 0);
     }
     return nghs;
   }
