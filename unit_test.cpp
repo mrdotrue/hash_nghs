@@ -12,7 +12,6 @@ template <uint32_t B = 16> void basic_test(uint32_t n) {
             << "==================================" << std::endl;
   // vertex id from 0,n-1
   // store u's nghs in a hashtable
-  // if n is that large, we should do recomputation but not batch dynamic
   uint32_t u = parlay::hash32(n) % n;
   std::cout << "#vertices: " << n << ", vertex: " << u << std::endl;
 
@@ -20,7 +19,7 @@ template <uint32_t B = 16> void basic_test(uint32_t n) {
   // set the capacity to 2 * n;
   nghs_ht<B> A(2 * n);
 
-  // create pairs for vertex [0,u-1] [u-1,n-1]
+  // create pairs for vertex id [0,u) + (u,n)
   // there shouldn't be edges from u to u
   // levels will be [2,32];
   auto vertices = parlay::tabulate(n - 1, [&](auto i) {
