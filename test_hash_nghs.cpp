@@ -22,7 +22,7 @@ void test_nghs_ht_sequential(uint32_t n = 128) {
   nghs_ht ht(n + 1, n * 2);
   for (uint32_t i = 0; i < n; i++) {
     if (i % 2)
-      ht.insert_exclusive(i, parlay::hash32(i) % 31 + 2);
+      ht.insert_sequential(i, parlay::hash32(i) % 31 + 2);
   }
   for (auto i = 0; i < n; i++) {
     if (i % 2) {

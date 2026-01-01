@@ -9,7 +9,7 @@
 #include <string>
 template <uint32_t B = 16> void basic_test(uint32_t n) {
   std::cout << "================================== start testing B = " << B
-            << "==================================" << std::endl;
+            << " =================================" << std::endl;
   // vertex id from 0,n-1
   // store u's nghs in a hashtable
   uint32_t u = parlay::hash32(n) % n;
@@ -19,7 +19,7 @@ template <uint32_t B = 16> void basic_test(uint32_t n) {
   // set the capacity to 2 * n;
   nghs_ht<B> A(2 * n);
 
-  // create pairs for vertex id [0,u) + (u,n)
+  // create pairs for vertex id [0,u-1] + [u+1,n-1]
   // there shouldn't be edges from u to u
   // levels will be [2,32];
   auto vertices = parlay::tabulate(n - 1, [&](auto i) {
@@ -65,6 +65,7 @@ template <uint32_t B = 16> void basic_test(uint32_t n) {
 
   std::cout << "================= start batch deletion ================="
             << std::endl;
+  // delete [0,n-1]
   auto deletions = parlay::tabulate(u, [&](auto i) { return (uint32_t)i; });
   parlay::internal::timer t_del;
   A.batch_deletion(deletions);
@@ -90,6 +91,36 @@ template <uint32_t B = 16> void basic_test(uint32_t n) {
     });
     std::cout << result.size() << std::endl;
   }
+
+  std::cout << "================= start batch update ==================="
+            << std::endl;
+  // updates level of [u+1,n] to 2
+  auto updates = parlay::tabulate(n - u - 1, [&](auto i) {
+    return std::pair((uint32_t)i + u + 1, (uint32_t)2);
+  });
+  parlay::internal::timer t_update;
+  A.batch_update(updates);
+  t_update.next("update " + std::to_string(u) + " edges ");
+
+  std::cout << "================= correctness check ===================="
+            << std::endl;
+  auto res3 = A.to_sequence_sorted();
+  assert(res3.size() == updates.size());
+  parlay::parallel_for(0, res3.size(), [&](auto i) {
+    assert(res3[i].first > u);
+    assert(2 == res3[i].second);
+  });
+  std::cout << "passed!" << std::endl;
+
+  std::cout << "================= start batch find ====================="
+            << std::endl;
+  auto alive =
+      parlay::tabulate(n - u - 1, [&](auto i) { return (uint32_t)i + u + 1; });
+  parlay::internal::timer t_find;
+  auto res4 = A.batch_find(alive);
+  t_find.next("batch find ");
+  parlay::parallel_for(0, res4.size(), [&](auto i) { assert(res4[i] == 2); });
+  std::cout << "passed!" << std::endl;
 }
 int main() {
   // basic_test(1024);

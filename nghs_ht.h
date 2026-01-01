@@ -27,8 +27,8 @@ private:
     constexpr entry_t(key_t _k, val_t _v) : k(_k), v(_v) {}
     //  reserved entry
     static constexpr key_t reserved_key = std::numeric_limits<key_t>::max();
-    static constexpr entry_t empty_entry{0, 0};
-    static constexpr entry_t deleted_entry{0, 1};
+    static constexpr entry_t empty_entry{reserved_key, 0};
+    static constexpr entry_t deleted_entry{reserved_key, 1};
     bool operator==(const entry_t &other) const {
       return k == other.k && v == other.v;
     }
@@ -185,64 +185,6 @@ private:
           fetch_top_down(nghs, level, fetched, r);
         });
   }
-  void insert_sequential(key_t k, val_t v, bool if_update_counter = true) {
-    // special case for level 1 edge
-    if (v == 1) {
-      if (roommate != reserved_key) {
-        std::cout << "repeat inserting level 1 edge" << std::endl;
-        std::abort();
-      }
-      roommate = k;
-      level_size[1] = 1;
-      remove(k, false); // k might already exist.
-      return;
-    }
-    // level 1 edge needs to change level
-    // is this necessary?
-    if (k == roommate) {
-      roommate = reserved_key;
-    }
-    // std::cout << k << " " << v << std::endl;
-    index_t i = firstIndex(k);
-    index_t st = i;
-    entry_t item(k, v);
-    while (records[i] != entry_t::empty_entry) {
-      if (records[i].k == k) {
-        // update value
-        // update level counter
-        // update record
-        // update bitmap in binary tree
-        // update num of used records
-        // if (if_update_counter) {
-        level_size[records[i].v]--;
-        level_size[v]++;
-        // }
-        records[i] = item;
-        update(i);
-        return;
-      }
-      if (records[i] == entry_t::deleted_entry) {
-        // find a deleted slot
-        if (if_update_counter) {
-          level_size[v]++;
-        }
-        records[i] = item;
-        update(i);
-        used_records++;
-        return;
-      }
-      i = incrementIndex(i);
-      if (i == st) {
-        std::cout << "hash table is full" << std::endl;
-        std::abort();
-      }
-    }
-    // found empty slot
-    level_size[v]++;
-    records[i] = item;
-    update(i);
-    used_records++;
-  }
   //  batch insertion and batch deletion share the same insert function
   //  one can reach empty slot, delete slot or update record,
   //  need to maintain
@@ -270,14 +212,6 @@ private:
     index_t st = i;
     entry_t item(k, v);
     while (true) {
-      if (records[i].k == k) {
-        // update value
-        level_size[records[i].v]--;
-        level_size[v]++;
-        records[i] = item;
-        update(i);
-        return;
-      }
       if (cas_64(&records[i], entry_t::deleted_entry, item) ||
           cas_64(&records[i], entry_t::empty_entry, item)) {
         used_records++;
@@ -292,22 +226,38 @@ private:
       }
     }
   }
-
-  val_t find(key_t k) {
-    if (k == roommate)
-      return 1;
+  void update(key_t k, val_t v) {
+    if (k == roommate) // level 1 edge can only be deleted
+      return;
+    if (v == 1) {
+      // process level 1 edge
+      if (!__sync_bool_compare_and_swap((uint32_t *)(&roommate),
+                                        (uint32_t)reserved_key, (uint32_t)k)) {
+        std::cout << "repeat inserting level 1 edge" << std::endl;
+        std::abort();
+      }
+      level_size[1] = 1;
+      remove(k, false); // k might already exist.
+      return;
+    }
     index_t i = firstIndex(k);
     index_t st = i;
     while (records[i] != entry_t::empty_entry) {
-      if (records[i].k == k)
-        return records[i].v;
+      if (records[i].k == k) {
+        level_size[records[i].v]--;
+        assert(records[i].v != 0);
+        level_size[v]++;
+        records[i].v = v;
+        update(i);
+        return;
+      }
       i = incrementIndex(i);
       if (i == st)
         break;
     }
-    return 0;
+    std::cout << "key doesn't exist" << std::endl;
+    std::abort();
   }
-
   void remove(key_t k, bool check = true) {
     // std::cout << k << std::endl;
     // process level 1 edge
@@ -320,6 +270,7 @@ private:
     int st = i;
     while (records[i] != entry_t::empty_entry) {
       if (records[i].k == k) {
+        assert(records[i].v != 0);
         level_size[records[i].v]--;
         records[i] = entry_t::deleted_entry; // mark slot as deleted
         update(i);
@@ -334,6 +285,20 @@ private:
       std::cout << "remove non-existent item" << std::endl;
       std::abort();
     }
+  }
+  val_t find(key_t k) {
+    if (k == roommate)
+      return 1;
+    index_t i = firstIndex(k);
+    index_t st = i;
+    while (records[i] != entry_t::empty_entry) {
+      if (records[i].k == k)
+        return records[i].v;
+      i = incrementIndex(i);
+      if (i == st)
+        break;
+    }
+    return 0;
   }
 
 public:
@@ -368,20 +333,30 @@ public:
   void batch_insertion(parlay::sequence<std::pair<key_t, val_t>> &ins) {
     ensure_capacity(ins.size());
     // std::cout << get_tree_size() << std::endl;
-    parlay::parallel_for(0, ins.size(),
-                         [&](auto i) { insert(ins[i].first, ins[i].second); });
+    parlay::parallel_for(0, ins.size(), [&](auto i) {
+      insert(ins[i].first, ins[i].second);
+      // assert(find(ins[i].first) == ins[i].second);
+    });
     update_top_down();
   }
   // batch update: sequence of (vertex, level)
   void batch_update(parlay::sequence<std::pair<key_t, val_t>> &upd) {
-    parlay::parallel_for(0, upd.size(),
-                         [&](auto i) { insert(upd[i].first, upd[i].second); });
+    parlay::parallel_for(0, upd.size(), [&](auto i) {
+      update(upd[i].first, upd[i].second);
+      assert(find(upd[i].first) == upd[i].second);
+    });
     update_top_down();
   }
   // batch deletion: only need to know the vertex
   void batch_deletion(parlay::sequence<key_t> &del) {
-    parlay::parallel_for(0, del.size(), [&](auto i) { remove(del[i]); });
+    parlay::parallel_for(0, del.size(), [&](auto i) {
+      remove(del[i]);
+      // assert(find(del[i]) == 0);
+    });
     update_top_down();
+  }
+  parlay::sequence<val_t> batch_find(parlay::sequence<key_t> &K) {
+    return parlay::map(K, [&](auto x) { return find(x); });
   }
   // fetch k level l edges
   parlay::sequence<key_t> fetch(key_t k, val_t l) {
@@ -423,16 +398,23 @@ public:
   }
   // debug check correctness for complete binary tree
   void print_tree_path(key_t k) {
+    std::cout << "hash table capacity " << capacity << std::endl;
     index_t i = firstIndex(k);
+    std::cout << "first index " << i << std::endl;
     index_t st = i;
     while (records[i] != entry_t::empty_entry) {
       if (records[i].k == k)
         break;
       i = incrementIndex(i);
+      std::cout << "next index " << i << std::endl;
       if (i == st)
         break;
     }
-    auto x = get_tree_index(i);
+    std::cout << "tree size " << get_tree_size() << std::endl;
+    std::cout << "internal node size " << get_internal_node_size() << std::endl;
+    std::cout << "leaf size " << get_leaf_size() << std::endl;
+    auto x = get_tree_index(i) - get_internal_node_size();
+    std::cout << "id of block " << x << std::endl;
     for (auto i = x * B; i < x * B + B; i++)
       std::cout << records[i].k << " " << records[i].v << std::endl;
     do {
