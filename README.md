@@ -16,6 +16,8 @@ g++ -O3 -Iparlaylib/include -std=c++17 ./unit_test.cpp -o unit_test
 using key_t = uint32_t;
 using val_t = uint32_t;
 
+key_t n;
+key_t capacity = 2 * n;
 nghs_ht A((uint32_t) capacity);
 
 A.batch_insertion(parlay::sequence<std::pair<key_t, val_t>> &ins)
