@@ -18,7 +18,7 @@ using val_t = uint32_t;
 
 key_t n;
 key_t capacity = 2 * n;
-nghs_ht A((uint32_t) capacity);
+nghs_ht A(capacity);
 
 A.batch_insertion(parlay::sequence<std::pair<key_t, val_t>> &ins)
 
