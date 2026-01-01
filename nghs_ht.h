@@ -443,5 +443,9 @@ public:
     }
     std::cout << "------------------------------------------" << std::endl;
   }
+  size_t get_space_usage() {
+    return sizeof(nghs_ht) + sizeof(entry_t) * capacity +
+           sizeof(uint32_t) * get_tree_size();
+  }
 };
 #endif

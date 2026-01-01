@@ -34,6 +34,9 @@ parlay::sequence<val_t> result = A.batch_find(parlay::sequence<key_t> &K);
 
 // fetch k level l edges;
 parlay::sequence<key_t> fetched_edges = A.fetch(key_t k, val_t l);
+
+std::cout << "total space used " << A.get_space_usage() / 1024 / 1024 << " MB"
+            << std::endl;
 ```
 
 

@@ -121,6 +121,8 @@ template <uint32_t B = 16> void basic_test(uint32_t n) {
   t_find.next("batch find ");
   parlay::parallel_for(0, res4.size(), [&](auto i) { assert(res4[i] == 2); });
   std::cout << "passed!" << std::endl;
+  std::cout << "total space used " << A.get_space_usage() / 1024 / 1024 << " MB"
+            << std::endl;
 }
 int main() {
   // basic_test(1024);
