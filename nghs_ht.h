@@ -32,8 +32,8 @@ private:
       return (val_t)1 << (l - 1);
     }
     inline static val_t get_raw(val_t v) {
-      assert(v != 0);
-      return __builtin_ctz(v) + 1;
+      // assert(v != 0);
+      return v == 0 ? 0 : __builtin_ctz(v) + 1;
     }
     entry_t(key_t _k, val_t _v) : k(_k), v(get_val(_v)){};
     entry_t(key_t _k) : k(_k), v(0){};
@@ -110,20 +110,23 @@ private:
     uint64_t nval = *(reinterpret_cast<uint64_t *>(&_nval));
     return __sync_bool_compare_and_swap(ptr, oval, nval);
   }
+  uint32_t fetch_and_or(uint32_t *ptr, uint32_t nval) {
+    return __sync_fetch_and_or(ptr, nval);
+  }
   void update(index_t k) {
     index_t i = get_tree_index(k);
-    navigation[i] |= 1;
+    fetch_and_or(&navigation[i], 1);
     while (i) {
       i = (i - 1) / 2;
       if (navigation[i] % 2)
         return;
-      navigation[i] |= 1;
+      fetch_and_or(&navigation[i], 1);
     }
   }
   void navigate_top_down(index_t root = 0) {
     if (navigation[root] % 2) {
-      if (root << 1 > navigation_length) {
-        index_t start = (navigation_length - (get_leaf_size(capacity) - 1)) * B;
+      if ((root << 1) > navigation_length) {
+        index_t start = (root - (get_leaf_size(capacity) - 1)) * B;
         navigation[root] = 0;
         for (auto i = start; i < start + B; i++)
           navigation[root] |= records[i].v;
@@ -149,16 +152,30 @@ private:
     }
   }
   void fetch_top_down(parlay::sequence<key_t> &nghs, uint32_t l,
-                      std::atomic<key_t> &fetched, index_t root = 0) {
-    if (root << 1 < navigation_length) {
+                      std::atomic<key_t> &fetched, uint32_t fetch_max,
+                      index_t root = 0) {
+    if ((navigation[root] & ((uint32_t)1 << l)) == 0)
+      return;
+    if ((root << 1) < navigation_length) {
       parlay::par_do(
-          [&]() { fetch_top_down(nghs, l, fetched, (root << 1) + 1); },
-          [&]() { fetch_top_down(nghs, l, fetched, (root << 1) + 2); });
+          [&]() {
+            auto lchild = (root << 1) + 1;
+            if ((navigation[lchild] & ((uint32_t)1 << l)) != 0)
+              fetch_top_down(nghs, l, fetched, fetch_max, lchild);
+          },
+          [&]() {
+            auto rchild = (root << 1) + 2;
+            if ((navigation[rchild] & ((uint32_t)1 << l)) != 0)
+              fetch_top_down(nghs, l, fetched, fetch_max, rchild);
+          });
     } else {
-      index_t start = (navigation_length - (get_leaf_size(capacity) - 1)) * B;
+      index_t start = (root - (get_leaf_size(capacity) - 1)) * B;
       for (auto i = start; i < start + B; i++)
         if (entry_t::get_raw(records[i].v) == l) {
-          nghs[fetched.fetch_add(1)] = records[i].k;
+          uint32_t it = fetched.fetch_add(1);
+          if (it >= fetched)
+            return;
+          nghs[it] = records[i].k;
         }
     }
   }
@@ -360,20 +377,25 @@ public:
                          [&](auto i) { insert(upd[i].first, upd[i].second); });
     navigate_top_down();
   }
-  void batch_deletion(parlay::sequence<std::pair<key_t, val_t>> &del) {
-    parlay::parallel_for(0, del.size(),
-                         [&](auto i) { delete (del[i].first, del[i].second); });
+  void batch_deletion(parlay::sequence<key_t> &del) {
+    parlay::parallel_for(0, del.size(), [&](auto i) { remove(del[i]); });
     navigate_top_down();
   }
-  parlay::sequence<key_t> fetch(key_t k, val_t l) {
+  parlay::sequence<key_t> fetch(uint32_t k, val_t l) {
     parlay::sequence<key_t> nghs;
     if (l == 1 && roommate != empty_key)
       nghs.push_back(roommate);
     else {
-      nghs.resize(level_size[l]);
-      fetch_top_down(nghs, l, 0);
+      nghs = parlay::sequence<key_t>(k);
+      std::atomic<uint32_t> fetched = k;
+      fetch_top_down(nghs, l, fetched, k);
     }
     return nghs;
+  }
+  void print_level_size() {
+    for (auto i = 0; i < 33; i++) {
+      std::cout << "level " << i << " edges " << level_size[i] << std::endl;
+    }
   }
 };
 #endif
