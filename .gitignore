@@ -41,5 +41,4 @@
 *.dwo
 
 .cache
-parlaylib
 compile_commands.json
