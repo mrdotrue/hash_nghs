@@ -21,16 +21,16 @@ key_t capacity = 2 * n;
 nghs_ht A(capacity);
 
 // insert neighbors to different levels
-A.batch_insertion(parlay::sequence<std::pair<key_t, val_t>> &ins)
+A.batch_insertion(parlay::{delayed_}sequence<std::pair<key_t, val_t>> &ins)
 
 // update the level of neighbors
-A.batch_update(parlay::sequence<std::pair<key_t, val_t>> &upd)
+A.batch_update(parlay::{delayed_}sequence<std::pair<key_t, val_t>> &upd)
 
 // remove neighbors
-A.batch_deletion(parlay::sequence<key_t> &del)
+A.batch_deletion(parlay::{delayed_}sequence<key_t> &del)
 
 // retrieve neighbor level
-parlay::sequence<val_t> result = A.batch_find(parlay::sequence<key_t> &K);
+parlay::sequence<val_t> result = A.batch_find(parlay::{delayed_}sequence<key_t> &K);
 
 // fetch k level l edges;
 parlay::sequence<key_t> fetched_edges = A.fetch(key_t k, val_t l);

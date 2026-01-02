@@ -40,13 +40,18 @@ private:
 
   static constexpr key_t reserved_key = entry_t::reserved_key;
 
-  key_t roommate;                    // level 1 edge
-  entry_t *records;                  // hash table
-  index_t capacity;                  // hash table capacity
-  std::atomic<index_t> used_records; // used_records slots
-  std::atomic<key_t> level_size[33]; // number of level i edges
-  uint32_t *navigation;              // complete binary tree
+  key_t roommate;   // level 1 edge
+  index_t capacity; // hash table capacity
+  index_t used_records;
+  char *records_navigation;
+  // entry_t *records; // hash table
+  // uint32_t *navigation; // complete binary tree
 
+  entry_t *get_records() { return (entry_t *)records_navigation; }
+
+  uint32_t *get_navigation() {
+    return (uint32_t *)(records_navigation + sizeof(entry_t) * capacity);
+  }
   // iterate hash table
   index_t firstIndex(key_t k) const { return parlay::hash32(k) % capacity; }
   index_t incrementIndex(index_t h) {
@@ -56,33 +61,37 @@ private:
 
   void ensure_capacity(uint32_t n_append) {
     if (capacity * load_factor < n_append + used_records) {
-      entry_t *old_records = records;
+      // entry_t *old_records = records;
+      entry_t *old_records = get_records();
       auto old_capacity = capacity;
-      auto old_navigation = navigation;
-
+      // auto old_navigation = navigation;
+      auto old_navigation = get_navigation();
+      auto old_records_navigation = records_navigation;
       capacity = (std::max(n_append + used_records,
                            old_capacity * (index_t)expand_factor) /
                       B +
                   1) *
                  B;
-      records = new entry_t[capacity];
+      records_navigation = (char *)malloc(sizeof(entry_t) * capacity +
+                                          sizeof(uint32_t) * get_tree_size());
+      // records = new entry_t[capacity];
+      auto records = get_records();
       parlay::parallel_for(0, capacity,
                            [&](auto i) { records[i] = entry_t::empty_entry; });
       auto navigation_length = get_tree_size();
       // std::cout << navigation_length << std::endl;
-      navigation = new uint32_t[navigation_length];
+      // navigation = new uint32_t[navigation_length];
+      auto navigation = get_navigation();
       memset(navigation, 0, navigation_length * sizeof(uint32_t));
-      used_records = 0;
-      for (auto i = 0; i < 33; i++)
-        level_size[i] = 0;
       parlay::parallel_for(0, old_capacity, [&](auto i) {
         if (old_records[i] != entry_t::empty_entry ||
             old_records[i] != entry_t::deleted_entry)
           insert(old_records[i].k, old_records[i].v);
       });
       update_top_down();
-      delete[] old_navigation;
-      delete[] old_records;
+      // delete[] old_navigation;
+      // delete[] old_records;
+      free(old_records_navigation);
     }
   }
 
@@ -118,7 +127,8 @@ private:
   }
 
   // update from bottom to top
-  void update(index_t k) {
+  void update_binary_tree(index_t k) {
+    auto navigation = get_navigation();
     index_t i = get_tree_index(k);
     // fetch_and_or(&navigation[i], 1);
     navigation[i] = 1;
@@ -133,9 +143,12 @@ private:
 
   // work efficient update augmented value
   void update_top_down(index_t root = 0) {
+    auto navigation = get_navigation();
+    auto records = get_records();
     if (navigation[root] == 1) { // root got marked
       if (isleaf(root)) {
         // leaf in binary tree needs to be mapped to a block from hash table
+
         index_t start = (root - get_internal_node_size()) * B;
         navigation[root] = 0;
         for (auto i = start; i < start + B; i++)
@@ -157,6 +170,8 @@ private:
   void fetch_top_down(parlay::sequence<key_t> &nghs, uint32_t level,
                       std::atomic<key_t> &fetched, index_t root = 0) {
     // level l should have lth bit set which is l - 1
+    auto navigation = get_navigation();
+    auto records = get_records();
     assert(root < get_tree_size());
     if ((navigation[root] & ((uint32_t)1 << (level - 1))) == 0)
       return;
@@ -166,6 +181,10 @@ private:
       // leaf in binary tree needs to be mapped to a block from hash table
       index_t start = (root - get_internal_node_size()) * B;
       for (auto i = start; i < start + B; i++) {
+        if (records[i].k == 0)
+          std::cout << "fetching " << records[i].k << " " << records[i].v << " "
+                    << level << std::endl;
+
         if (records[i].v == level) {
           auto o = fetched.fetch_add(1);
           if (o >= nghs.size())
@@ -202,10 +221,10 @@ private:
         std::cout << "repeat inserting level 1 edge" << std::endl;
         std::abort();
       }
-      level_size[1] = 1;
       remove(k, false); // k might already exist.
       return;
     }
+    auto records = get_records();
     assert(k != reserved_key);
     assert(k != roommate); // level 1 edge can only be deleted
     index_t i = firstIndex(k);
@@ -214,9 +233,7 @@ private:
     while (true) {
       if (cas_64(&records[i], entry_t::deleted_entry, item) ||
           cas_64(&records[i], entry_t::empty_entry, item)) {
-        used_records++;
-        level_size[v]++;
-        update(i);
+        update_binary_tree(i);
         return;
       }
       i = incrementIndex(i);
@@ -236,19 +253,16 @@ private:
         std::cout << "repeat inserting level 1 edge" << std::endl;
         std::abort();
       }
-      level_size[1] = 1;
       remove(k, false); // k might already exist.
       return;
     }
+    auto records = get_records();
     index_t i = firstIndex(k);
     index_t st = i;
     while (records[i] != entry_t::empty_entry) {
       if (records[i].k == k) {
-        level_size[records[i].v]--;
-        assert(records[i].v != 0);
-        level_size[v]++;
         records[i].v = v;
-        update(i);
+        update_binary_tree(i);
         return;
       }
       i = incrementIndex(i);
@@ -263,18 +277,16 @@ private:
     // process level 1 edge
     if (k == roommate) {
       roommate = reserved_key;
-      level_size[1] = 0;
       return;
     }
+    auto records = get_records();
     index_t i = firstIndex(k);
     int st = i;
     while (records[i] != entry_t::empty_entry) {
       if (records[i].k == k) {
         assert(records[i].v != 0);
-        level_size[records[i].v]--;
         records[i] = entry_t::deleted_entry; // mark slot as deleted
-        update(i);
-        used_records--;
+        update_binary_tree(i);
         return;
       }
       i = incrementIndex(i);
@@ -289,6 +301,7 @@ private:
   val_t find(key_t k) {
     if (k == roommate)
       return 1;
+    auto records = get_records();
     index_t i = firstIndex(k);
     index_t st = i;
     while (records[i] != entry_t::empty_entry) {
@@ -304,20 +317,23 @@ private:
 public:
   nghs_ht(index_t _capacity = B)
       : capacity((std::max(_capacity, (index_t)B) / B + 1) * B),
-        used_records(0), roommate(/*_empty_key*/ reserved_key) {
-    records = new entry_t[capacity];
+        used_records(0), roommate(reserved_key), records_navigation(nullptr) {
+    records_navigation = (char *)malloc(sizeof(entry_t) * capacity +
+                                        sizeof(uint32_t) * get_tree_size());
+    // records = new entry_t[capacity];
+    auto records = get_records();
     parlay::parallel_for(0, capacity,
                          [&](auto i) { records[i] = entry_t::empty_entry; });
     auto navigation_length = get_tree_size();
     // std::cout << navigation_length << std::endl;
-    navigation = new uint32_t[navigation_length];
+    // navigation = new uint32_t[navigation_length];
+    auto navigation = get_navigation();
     memset(navigation, 0, navigation_length * sizeof(uint32_t));
-    for (auto i = 0; i < 33; i++)
-      level_size[i] = 0;
   }
   ~nghs_ht() {
-    delete[] records;
-    delete[] navigation;
+    // delete[] records;
+    // delete[] navigation;
+    free(records_navigation);
   }
   nghs_ht(const nghs_ht &) = delete;
   nghs_ht &operator=(const nghs_ht &) = delete;
@@ -330,17 +346,22 @@ public:
   }
 
   // batch insertion: sequence of (vertex, level)
-  void batch_insertion(parlay::sequence<std::pair<key_t, val_t>> &ins) {
+  template <class T = parlay::sequence<std::pair<key_t, val_t>>>
+  void batch_insertion(T &ins) {
     ensure_capacity(ins.size());
     // std::cout << get_tree_size() << std::endl;
+    used_records += ins.size();
+    parlay::internal::timer t;
     parlay::parallel_for(0, ins.size(), [&](auto i) {
       insert(ins[i].first, ins[i].second);
       // assert(find(ins[i].first) == ins[i].second);
     });
+    t.next("pure insertion");
     update_top_down();
   }
   // batch update: sequence of (vertex, level)
-  void batch_update(parlay::sequence<std::pair<key_t, val_t>> &upd) {
+  template <class T = parlay::sequence<std::pair<key_t, val_t>>>
+  void batch_update(T &upd) {
     parlay::parallel_for(0, upd.size(), [&](auto i) {
       update(upd[i].first, upd[i].second);
       assert(find(upd[i].first) == upd[i].second);
@@ -348,14 +369,16 @@ public:
     update_top_down();
   }
   // batch deletion: only need to know the vertex
-  void batch_deletion(parlay::sequence<key_t> &del) {
+  template <class T = parlay::sequence<key_t>> void batch_deletion(T &del) {
+    used_records -= del.size();
     parlay::parallel_for(0, del.size(), [&](auto i) {
       remove(del[i]);
       // assert(find(del[i]) == 0);
     });
     update_top_down();
   }
-  parlay::sequence<val_t> batch_find(parlay::sequence<key_t> &K) {
+  template <class T = parlay::sequence<key_t>>
+  parlay::sequence<val_t> batch_find(T &K) {
     return parlay::map(K, [&](auto x) { return find(x); });
   }
   // fetch k level l edges
@@ -365,17 +388,21 @@ public:
       nghs.push_back(roommate);
     else {
       // if k > number of all level l edges, fetch all
-      k = std::min(k, (key_t)level_size[l]);
       // store result in sequence, allocate space in advance
       nghs = parlay::sequence<key_t>(k);
       // use atomic variable to see how many edges we still need to fetch
       std::atomic<uint32_t> fetched = 0;
       fetch_top_down(nghs, l, fetched);
+      if (fetched < nghs.size())
+        nghs.resize(fetched);
     }
+    // parlay::parallel_for(0, nghs.size(),
+    //                      [&](auto i) { assert(find(nghs[i]) == l); });
     return nghs;
   }
   // debug export alive neighbors and their levels
   parlay::sequence<std::pair<key_t, val_t>> to_sequence_sorted() {
+    auto records = get_records();
     parlay::sequence<std::pair<key_t, val_t>> alive;
     if (roommate != reserved_key)
       alive.emplace_back(std::pair(roommate, 1));
@@ -390,14 +417,10 @@ public:
             const std::pair<key_t, val_t> &b) { return a.first < b.first; });
   }
   // debug
-  void print_level_size() {
-    for (auto i = 0; i < 33; i++) {
-      std::cout << "number of level " << i << " edges " << level_size[i]
-                << std::endl;
-    }
-  }
   // debug check correctness for complete binary tree
   void print_tree_path(key_t k) {
+    auto records = get_records();
+    auto navigation = get_navigation();
     std::cout << "hash table capacity " << capacity << std::endl;
     index_t i = firstIndex(k);
     std::cout << "first index " << i << std::endl;
@@ -413,10 +436,17 @@ public:
     std::cout << "tree size " << get_tree_size() << std::endl;
     std::cout << "internal node size " << get_internal_node_size() << std::endl;
     std::cout << "leaf size " << get_leaf_size() << std::endl;
+    std::cout << "tree index " << get_tree_index(i) << std::endl;
     auto x = get_tree_index(i) - get_internal_node_size();
     std::cout << "id of block " << x << std::endl;
-    for (auto i = x * B; i < x * B + B; i++)
+    uint32_t v = 0;
+    for (auto i = x * B; i < x * B + B; i++) {
       std::cout << records[i].k << " " << records[i].v << std::endl;
+      v |= get_bit_val(records[i].v);
+    }
+    std::cout << "augmented value of this block " << std::bitset<32>(v)
+              << std::endl;
+    x = get_tree_index(i);
     do {
       std::cout << x << " " << std::bitset<32>(navigation[x]) << std::endl;
       x = (x - 1) / 2;
@@ -424,6 +454,7 @@ public:
   }
   // print hash table layout
   void display() const {
+    auto records = get_records();
     std::cout << "\n--- Hash record Contents (Size: " << used_records
               << " Capacity: " << capacity << ") ---" << std::endl;
     if (roommate != reserved_key)

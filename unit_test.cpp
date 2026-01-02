@@ -18,7 +18,7 @@ template <uint32_t B = 16> void basic_test(uint32_t n) {
   // we will insert n-1 elements into hash table
   // set the capacity to 2 * n;
   nghs_ht<B> A(2 * n);
-
+  std::cout << sizeof(A) << std::endl;
   // create pairs for vertex id [0,u-1] + [u+1,n-1]
   // there shouldn't be edges from u to u
   // levels will be [2,32];
@@ -47,7 +47,7 @@ template <uint32_t B = 16> void basic_test(uint32_t n) {
             << std::endl;
   for (uint32_t i = 2; i < 33; i++) {
     parlay::internal::timer t_fetch;
-    auto result = A.fetch(n, i); // fetch all level i edges
+    auto result = A.fetch(n / 32, i); // fetch all level i edges
     t_fetch.next("fetch level " + std::to_string(i) + " edges");
     // correctness check
     parlay::parallel_for(0, result.size(), [&](auto j) {
@@ -83,10 +83,14 @@ template <uint32_t B = 16> void basic_test(uint32_t n) {
             << std::endl;
   for (uint32_t i = 2; i < 33; i++) {
     parlay::internal::timer t_fetch;
-    auto result = A.fetch(n, i); // fetch all level i edges
+    auto result = A.fetch(n / 32, i); // fetch all level i edges
     t_fetch.next("fetch level " + std::to_string(i) + " edges");
     // correctness check
     parlay::parallel_for(0, result.size(), [&](auto j) {
+      if (parlay::hash32((uint32_t)result[j]) % 31 + 2 != i) {
+        std::cout << result[j] << " " << i << " "
+                  << parlay::hash32((uint32_t)result[j]) % 31 + 2 << std::endl;
+      }
       assert(parlay::hash32((uint32_t)result[j]) % 31 + 2 == i);
     });
     std::cout << result.size() << std::endl;
