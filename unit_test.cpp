@@ -104,7 +104,7 @@ template <uint32_t B = 16> void basic_test(uint32_t n) {
   });
   parlay::internal::timer t_update;
   A.batch_update(updates);
-  t_update.next("update " + std::to_string(u) + " edges ");
+  t_update.next("update " + std::to_string(n - u - 1) + " edges ");
 
   std::cout << "================= correctness check ===================="
             << std::endl;
